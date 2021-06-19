@@ -386,16 +386,16 @@ func TestConnClose(t *testing.T) {
 	}
 	conn.deriveInitialKeyMaterial([]byte("client"))
 	conn.Close(false, 1, "failure")
-	if conn.ConnectionState() != StateAttempted {
-		t.Fatalf("expect connection state not changed, got %v", conn.ConnectionState())
+	if conn.state != stateAttempted {
+		t.Fatalf("expect connection state not changed, got %v", conn.state)
 	}
 	b := make([]byte, 100)
 	n, err := conn.Read(b)
 	if err != nil || n == 0 {
 		t.Fatalf("expect read has data, got %v %v", n, err)
 	}
-	if conn.ConnectionState() != StateClosed {
-		t.Fatalf("expect connection state %v, got %v", StateClosed, conn.ConnectionState())
+	if conn.state != stateClosed {
+		t.Fatalf("expect connection state %v, got %v", stateClosed, conn.state)
 	}
 }
 
@@ -455,10 +455,10 @@ func TestConnHandshakeLoss(t *testing.T) {
 	p.assertClientSend() // CH1: crypto
 	p.assertServerSend() // SH4: ack + SA0: done
 
-	if p.client.ConnectionState() != StateActive {
+	if p.client.state != stateActive {
 		t.Fatal("client has not handshaked")
 	}
-	if p.server.ConnectionState() != StateActive {
+	if p.server.state != stateActive {
 		t.Fatal("server has not handshaked")
 	}
 	t.Logf("server tx: %d, client tx: %d", p.serverTx, p.clientTx)
@@ -502,7 +502,7 @@ func TestConnHandshakeTimeout(t *testing.T) {
 
 	now = now.Add(10 * time.Second)
 	p.server.Write(nil)
-	if p.server.ConnectionState() != StateClosed {
+	if p.server.state != stateClosed {
 		t.Fatal("server has not closed")
 	}
 }
@@ -734,7 +734,7 @@ func (t *testEndpoint) assertHandshake() {
 
 func (t *testEndpoint) handshake() error {
 	i := 0
-	for t.client.ConnectionState() != StateActive || t.server.ConnectionState() != StateActive {
+	for !t.client.HandshakeComplete() || !t.server.HandshakeComplete() {
 		n, err := t.client.Read(t.buf[:])
 		if err != nil {
 			return err
