@@ -94,11 +94,11 @@ func (s *Client) Connect(addr string) error {
 		s.peersMu.Unlock()
 		return fmt.Errorf("client is already closed")
 	}
-	if _, ok := s.peers[string(c.scid[:])]; ok {
+	if _, ok := s.peers[string(c.scid)]; ok {
 		s.peersMu.Unlock()
 		return fmt.Errorf("connection id conflict cid=%x", c.scid)
 	}
-	s.peers[string(c.scid[:])] = c
+	s.peers[string(c.scid)] = c
 	s.peersMu.Unlock()
 	// Send initial packet
 	s.logger.log(levelInfo, "connection_started cid=%x addr=%v", c.scid, c.addr)
@@ -106,7 +106,7 @@ func (s *Client) Connect(addr string) error {
 	defer freePacket(p)
 	if err = s.sendConn(c, p.buf[:maxDatagramSize]); err != nil {
 		s.peersMu.Lock()
-		delete(s.peers, string(c.scid[:]))
+		delete(s.peers, string(c.scid))
 		s.peersMu.Unlock()
 		return fmt.Errorf("send %s: %v", c.addr, err)
 	}
