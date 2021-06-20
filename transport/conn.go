@@ -585,8 +585,8 @@ func (s *Conn) recvFrameResetStream(b []byte, now time.Time) (int, error) {
 	if f.finalSize > st.recv.length {
 		mayRecv = f.finalSize - st.recv.length
 	}
-	if mayRecv > s.flow.canRecv() {
-		return 0, newError(FlowControlError, sprint("reset_stream: connection data exceeded ", s.flow.maxRecv))
+	if mayRecv > s.flow.availRecv() {
+		return 0, newError(FlowControlError, sprint("reset_stream: connection data exceeded ", s.flow.recvMax))
 	}
 	err = st.resetRecv(f.finalSize)
 	if err != nil {
@@ -674,8 +674,8 @@ func (s *Conn) recvFrameStream(b []byte, now time.Time) (int, error) {
 		debug("peer attempted to sent to our stream: id=%d local=%v bidi=%v", f.streamID, local, bidi)
 		return 0, newError(StreamStateError, "writing not permitted")
 	}
-	if uint64(len(f.data)) > s.flow.canRecv() {
-		return 0, newError(FlowControlError, sprint("stream: connection data exceeded ", s.flow.maxRecv))
+	if uint64(len(f.data)) > s.flow.availRecv() {
+		return 0, newError(FlowControlError, sprint("stream: connection data exceeded ", s.flow.recvMax))
 	}
 	st, err := s.getOrCreateStream(f.streamID, false)
 	if err != nil {
@@ -700,7 +700,7 @@ func (s *Conn) recvFrameMaxData(b []byte, now time.Time) (int, error) {
 		return 0, err
 	}
 	debug("received frame 0x%x: %v", b[0], &f)
-	s.flow.setMaxSend(f.maximumData)
+	s.flow.setSendMax(f.maximumData)
 	s.logFrameProcessed(&f, now)
 	return n, nil
 }
@@ -716,7 +716,7 @@ func (s *Conn) recvFrameMaxStreamData(b []byte, now time.Time) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	st.flow.setMaxSend(f.maximumData)
+	st.flow.setSendMax(f.maximumData)
 	s.logFrameProcessed(&f, now)
 	return n, nil
 }
@@ -741,7 +741,6 @@ func (s *Conn) recvFrameMaxStreams(b []byte, now time.Time) (int, error) {
 	return n, nil
 }
 
-// TODO
 func (s *Conn) recvFrameDataBlocked(b []byte, now time.Time) (int, error) {
 	var f dataBlockedFrame
 	n, err := f.decode(b)
@@ -749,11 +748,14 @@ func (s *Conn) recvFrameDataBlocked(b []byte, now time.Time) (int, error) {
 		return 0, err
 	}
 	debug("received frame 0x%x: %v", b[0], &f)
+	// Respond MAX_DATA frame
+	if s.flow.recvMaxNext > f.dataLimit {
+		s.updateMaxData = true
+	}
 	s.logFrameProcessed(&f, now)
 	return n, nil
 }
 
-// TODO
 func (s *Conn) recvFrameStreamDataBlocked(b []byte, now time.Time) (int, error) {
 	var f streamDataBlockedFrame
 	n, err := f.decode(b)
@@ -761,11 +763,15 @@ func (s *Conn) recvFrameStreamDataBlocked(b []byte, now time.Time) (int, error) 
 		return 0, err
 	}
 	debug("received frame 0x%x: %v", b[0], &f)
+	// Respond MAX_STREAM_DATA frame
+	st := s.streams.get(f.streamID)
+	if st != nil && st.flow.recvMaxNext > f.dataLimit {
+		st.setUpdateMaxData(true)
+	}
 	s.logFrameProcessed(&f, now)
 	return n, nil
 }
 
-// TODO
 func (s *Conn) recvFrameStreamsBlocked(b []byte, now time.Time) (int, error) {
 	var f streamsBlockedFrame
 	n, err := f.decode(b)
@@ -773,6 +779,16 @@ func (s *Conn) recvFrameStreamsBlocked(b []byte, now time.Time) (int, error) {
 		return 0, err
 	}
 	debug("received frame 0x%x: %v", b[0], &f)
+	// Respond MAX_STREAMS frame
+	if f.bidi {
+		if s.streams.maxStreamsNext.localBidi > f.streamLimit {
+			s.streams.setUpdateMaxStreamsBidi(true)
+		}
+	} else {
+		if s.streams.maxStreamsNext.localUni > f.streamLimit {
+			s.streams.setUpdateMaxStreamsUni(true)
+		}
+	}
 	s.logFrameProcessed(&f, now)
 	return n, nil
 }
@@ -939,7 +955,7 @@ func (s *Conn) doHandshake(now time.Time) error {
 func (s *Conn) setPeerParams(params *Parameters, now time.Time) {
 	s.peerParams = *params
 	// Update flow and stream states
-	s.flow.setMaxSend(s.peerParams.InitialMaxData)
+	s.flow.setSendMax(s.peerParams.InitialMaxData)
 	s.streams.setPeerMaxStreamsBidi(s.peerParams.InitialMaxStreamsBidi)
 	s.streams.setPeerMaxStreamsUni(s.peerParams.InitialMaxStreamsUni)
 	// Update loss recovery state
@@ -1037,7 +1053,6 @@ func (s *Conn) Read(b []byte) (int, error) {
 			}
 		}
 	}
-	s.logRecovery(now)
 	// Keep track bytes received from client to limit bytes send back
 	// until its address is verified.
 	if !s.isClient && !s.peerAddressVerified {
@@ -1049,6 +1064,9 @@ func (s *Conn) Read(b []byte) (int, error) {
 	}
 	s.sentPackets++
 	s.sentBytes += uint64(n)
+	if n > 0 {
+		s.logRecovery(now)
+	}
 	return n, nil
 }
 
@@ -1174,7 +1192,8 @@ func (s *Conn) writeSpace() packetSpace {
 	}
 	// If there are flushable streams, use Application.
 	if s.state == stateActive && ((!s.isClient && !s.handshakeConfirmed) ||
-		s.streams.hasUpdate() || s.flow.shouldUpdateMaxRecv() || s.datagram.isFlushable()) {
+		s.updateMaxData || s.flow.shouldUpdateRecvMax() || s.flow.sendBlocked ||
+		s.datagram.isFlushable() || s.streams.hasUpdate()) {
 		return packetSpaceApplication
 	}
 	// Nothing to send
@@ -1243,6 +1262,13 @@ func (s *Conn) processLostPackets(space packetSpace, now time.Time) {
 				s.streams.setUpdateMaxStreamsBidi(true)
 			} else {
 				s.streams.setUpdateMaxStreamsUni(true)
+			}
+		case *dataBlockedFrame:
+			s.flow.setSendBlocked(true)
+		case *streamDataBlockedFrame:
+			st := s.streams.get(f.streamID)
+			if st != nil {
+				st.flow.setSendBlocked(true)
 			}
 		case *pathResponseFrame:
 			s.pathResponse = f.data
@@ -1315,7 +1341,7 @@ func (s *Conn) sendFrames(op *sentPacket, space packetSpace, left int, now time.
 				payloadLen += n
 				left -= n
 				s.updateMaxData = false
-				s.flow.commitMaxRecv()
+				s.flow.commitRecvMax()
 			}
 		}
 		// MAX_STREAMS (bidi)
@@ -1340,12 +1366,15 @@ func (s *Conn) sendFrames(op *sentPacket, space packetSpace, left int, now time.
 				s.streams.commitMaxStreamsUni()
 			}
 		}
-		// DATAGRAM
-		for f := s.sendFrameDatagram(left); f != nil; f = s.sendFrameDatagram(left) {
+		// DATA_BLOCKED
+		if f := s.sendFrameDataBlocked(); f != nil {
 			n := f.encodedLen()
-			op.addFrame(f)
-			payloadLen += n
-			left -= n
+			if left >= n {
+				op.addFrame(f)
+				payloadLen += n
+				left -= n
+				s.flow.setSendBlocked(false)
+			}
 		}
 		for id, st := range s.streams.streams {
 			// STOP_SENDING
@@ -1376,9 +1405,26 @@ func (s *Conn) sendFrames(op *sentPacket, space packetSpace, left int, now time.
 					payloadLen += n
 					left -= n
 					st.setUpdateMaxData(false)
-					st.flow.commitMaxRecv()
+					st.flow.commitRecvMax()
 				}
 			}
+			// STREAM_DATA_BLOCKED
+			if f := s.sendFrameStreamDataBlocked(id, st); f != nil {
+				n := f.encodedLen()
+				if left >= n {
+					op.addFrame(f)
+					payloadLen += n
+					left -= n
+					st.flow.setSendBlocked(false)
+				}
+			}
+		}
+		// DATAGRAM
+		for f := s.sendFrameDatagram(left); f != nil; f = s.sendFrameDatagram(left) {
+			n := f.encodedLen()
+			op.addFrame(f)
+			payloadLen += n
+			left -= n
 		}
 		// STREAM
 		// TODO: support stream priority
@@ -1389,6 +1435,10 @@ func (s *Conn) sendFrames(op *sentPacket, space packetSpace, left int, now time.
 				payloadLen += n
 				left -= n
 				s.flow.addSend(len(f.data))
+				if s.flow.availSend() == 0 {
+					debug("connection blocked: %v", &s.flow)
+					s.flow.setSendBlocked(true)
+				}
 				if left <= maxStreamFrameOverhead {
 					break
 				}
@@ -1465,6 +1515,7 @@ func (s *Conn) checkTimeout(now time.Time) {
 		return
 	}
 	if !s.recovery.lossDetectionTimer.IsZero() && !now.Before(s.recovery.lossDetectionTimer) {
+		debug("timed out")
 		s.recovery.onLossDetectionTimeout(now)
 	}
 }
@@ -1574,14 +1625,14 @@ func (s *Conn) sendFrameCrypto(space packetSpace, left int) *cryptoFrame {
 
 func (s *Conn) sendFrameStream(id uint64, st *Stream, left int) *streamFrame {
 	// Connection level limits
-	allowed := int(s.flow.canSend())
+	allowed := int(s.flow.availSend())
 	left -= maxStreamFrameOverhead
 	if left > allowed {
 		left = allowed
 	}
 	// In PTO mode, stream data can be resend so we need to check stream limits.
 	if s.recovery.ptoCount > 0 {
-		allowed = int(st.flow.canSend())
+		allowed = int(st.flow.availSend())
 		if left > allowed {
 			left = allowed
 		}
@@ -1611,15 +1662,15 @@ func (s *Conn) sendFrameStopSending(id uint64, st *Stream) *stopSendingFrame {
 }
 
 func (s *Conn) sendFrameMaxData() *maxDataFrame {
-	if s.updateMaxData || s.flow.shouldUpdateMaxRecv() {
-		return newMaxDataFrame(s.flow.maxRecvNext)
+	if s.updateMaxData || s.flow.shouldUpdateRecvMax() {
+		return newMaxDataFrame(s.flow.recvMaxNext)
 	}
 	return nil
 }
 
 func (s *Conn) sendFrameMaxStreamData(id uint64, st *Stream) *maxStreamDataFrame {
 	if st.updateMaxData {
-		return newMaxStreamDataFrame(id, st.flow.maxRecvNext)
+		return newMaxStreamDataFrame(id, st.flow.recvMaxNext)
 	}
 	return nil
 }
@@ -1634,6 +1685,20 @@ func (s *Conn) sendFrameMaxStreamsBidi() *maxStreamsFrame {
 func (s *Conn) sendFrameMaxStreamsUni() *maxStreamsFrame {
 	if s.streams.updateMaxStreamsUni {
 		return newMaxStreamsFrame(s.streams.maxStreamsNext.localUni, false)
+	}
+	return nil
+}
+
+func (s *Conn) sendFrameDataBlocked() *dataBlockedFrame {
+	if s.flow.sendBlocked {
+		return newDataBlockedFrame(s.flow.sendMax)
+	}
+	return nil
+}
+
+func (s *Conn) sendFrameStreamDataBlocked(id uint64, st *Stream) *streamDataBlockedFrame {
+	if st.flow.sendBlocked {
+		return newStreamDataBlockedFrame(id, st.flow.sendMax)
 	}
 	return nil
 }
@@ -1750,7 +1815,7 @@ func (s *Conn) addStreamEvents(events []Event) []Event {
 				events = append(events, newEventStreamReadable(id))
 			}
 		}
-		if s.flow.canSend() > 0 {
+		if s.flow.availSend() > 0 {
 			for id, st := range s.streams.streams {
 				if st.isWritable() {
 					events = append(events, newEventStreamWritable(id))

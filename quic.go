@@ -610,14 +610,13 @@ func (s *localConn) pollConn(c *Conn) {
 		return
 	}
 	// Maybe another packets arrived too while we processed the first one.
-	s.pollConnDelay(c)
+	if c.conn.HandshakeComplete() {
+		// Only for application space
+		s.pollConnDelay(c)
+	}
 }
 
 func (s *localConn) pollConnDelay(c *Conn) {
-	if !c.conn.HandshakeComplete() {
-		// Only for application space
-		return
-	}
 	// TODO: check whether we only need to send back ACK, then we can delay it.
 	timer := time.NewTimer(2 * time.Millisecond) // FIXME: timer granularity
 	defer timer.Stop()

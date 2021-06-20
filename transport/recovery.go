@@ -180,27 +180,26 @@ func (s *lossRecovery) onPacketSent(p *sentPacket, space packetSpace) {
 func (s *lossRecovery) onAckReceived(ranges rangeSet, ackDelay time.Duration, space packetSpace, now time.Time) {
 	largestAcked := ranges.largest()
 	if largestAcked > s.largestSentPacket[space] {
-		debug("invalid largest acknowledged packet number: %v %v", s.largestSentPacket, ranges)
+		debug("invalid largest acknowledged packet number: largestAcked=%v largestSent=%v %v",
+			largestAcked, s.largestSentPacket[space], ranges)
 		return
 	}
 	if s.largestAckedPacket[space] == maxUint64 || s.largestAckedPacket[space] < largestAcked {
 		s.largestAckedPacket[space] = largestAcked
 	}
 	// Finds packets that are newly acknowledged and removes them from sent packets.
-	var ackedPackets []*sentPacket
+	ackedPackets := make([]*sentPacket, 0, len(s.sent[space]))
 	hasAckEliciting := false
-	for _, r := range ranges {
-		s.filterSent(space, func(p *sentPacket) bool {
-			if p.packetNumber < r.start || p.packetNumber > r.end {
-				return false
-			}
+	s.filterSent(space, func(p *sentPacket) bool {
+		if ranges.contains(p.packetNumber) {
 			if p.ackEliciting {
 				hasAckEliciting = true
 			}
 			ackedPackets = append(ackedPackets, p)
 			return true
-		})
-	}
+		}
+		return false
+	})
 	if len(ackedPackets) == 0 {
 		// Nothing to do if there are no newly acked packets.
 		return
@@ -224,9 +223,10 @@ func (s *lossRecovery) onAckReceived(ranges rangeSet, ackDelay time.Duration, sp
 	s.onPacketsAcked(ackedPackets, space)
 	// Reset pto_count unless the client is unsure if
 	// the server has validated the client's address.
-	// TODO: PeerCompletedAddressValidation()
-	s.ptoCount = 0
-	s.lossProbes[space] = 0
+	if s.peerCompletedAddressValidation {
+		s.ptoCount = 0
+		s.lossProbes[space] = 0
+	}
 	s.setLossDetectionTimer(now)
 }
 
@@ -292,6 +292,7 @@ func (s *lossRecovery) setLossDetectionTimer(now time.Time) {
 	// Determine which PN space to arm PTO for.
 	timeout, _ := s.earliestProbeTime(now)
 	s.lossDetectionTimer = timeout
+	debug("set loss_timer=%v", timeout)
 }
 
 // onLossDetectionTimeout checks lossDetectionTimer to detect whether a packet was lost.
@@ -525,6 +526,7 @@ func (s *lossRecovery) onPacketsLost(packets []*sentPacket, space packetSpace, n
 	}
 }
 
+// filterSent removes packet from sent[space] when the filter function returns true.
 func (s *lossRecovery) filterSent(space packetSpace, filter func(*sentPacket) bool) {
 	sent := s.sent[space]
 	if len(sent) > 0 {
@@ -673,6 +675,7 @@ func (s *congestionControl) onNewCongestionEvent(sentTime, now time.Time) {
 	}
 	s.recoveryStartTime = now
 	s.congestionWindow = s.congestionWindow / lossReductionFactor
+	debug("congestion event: congestion_window=%v bytes_in_flight=%v", s.congestionWindow, s.bytesInFlight)
 	minimumWindow := minimumWindowPackets * s.maxDatagramSize
 	if s.congestionWindow < minimumWindow {
 		s.congestionWindow = minimumWindow

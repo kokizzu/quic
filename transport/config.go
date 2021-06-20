@@ -73,10 +73,10 @@ func NewConfig() *Config {
 			MaxIdleTimeout:    30 * time.Second,
 			MaxUDPPayloadSize: defaultMaxUDPPayloadSize,
 
-			InitialMaxData:                 16384,
-			InitialMaxStreamDataBidiLocal:  8192,
-			InitialMaxStreamDataBidiRemote: 8192,
-			InitialMaxStreamDataUni:        8192,
+			InitialMaxData:                 65536,
+			InitialMaxStreamDataBidiLocal:  65536,
+			InitialMaxStreamDataBidiRemote: 65536,
+			InitialMaxStreamDataUni:        65536,
 			InitialMaxStreamsBidi:          1,
 			InitialMaxStreamsUni:           1,
 

@@ -108,7 +108,7 @@ func (w *keyLogWriter) Write(b []byte) (int, error) {
 	return w.w.Write(b)
 }
 
-var buffers = newBufferCache(2048, 10)
+var buffers = newBufferCache(8192, 10)
 
 type bufferCache struct {
 	list chan []byte

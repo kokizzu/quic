@@ -207,7 +207,7 @@ func TestConnSendMaxData(t *testing.T) {
 	if err == nil || err.Error() != "flow_control_error stream: connection data exceeded 200" {
 		t.Fatalf("expect error %v, actual %v", errorCodeString(FlowControlError), err)
 	}
-	stream.data = b[:100]
+	stream.data = b[:140]
 	_, err = s.recvFrameStream(encodeFrame(stream), testTime())
 	if err != nil {
 		t.Fatal(err)
@@ -216,17 +216,17 @@ func TestConnSendMaxData(t *testing.T) {
 	if maxData != nil {
 		t.Fatalf("expect no max data frame, actual %v", maxData)
 	}
-	// max 1024, read 1000
+	// max 200, read 100, next 300
 	st, _ := s.Stream(4)
 	st.Read(b)
 	t.Logf("flow: %+v", s.flow)
 	maxData = s.sendFrameMaxData()
-	if maxData == nil || maxData.maximumData != 300 {
+	if maxData == nil || maxData.maximumData != 340 {
 		t.Fatalf("expect max data frame, actual %v", maxData)
 	}
 	t.Logf("stream flow: %+v", st.flow)
 	maxStreamData := s.sendFrameMaxStreamData(4, st)
-	if maxStreamData == nil || maxStreamData.streamID != 4 || maxStreamData.maximumData != 250 {
+	if maxStreamData == nil || maxStreamData.streamID != 4 || maxStreamData.maximumData != 290 {
 		t.Fatalf("expect max stream data frame, actual %v", maxStreamData)
 	}
 }
@@ -299,7 +299,7 @@ func TestConnRecvResetStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if conn.flow.totalRecv != f.finalSize {
+	if conn.flow.recvTotal != f.finalSize {
 		t.Fatalf("expect flow recv %v, actual %+v", 10, conn.flow)
 	}
 	events := conn.Events(nil)
@@ -532,6 +532,19 @@ func TestConnResumption(t *testing.T) {
 	t.Logf("resume handshake: %d bytes", tx2)
 	if tx1 <= tx2 {
 		t.Fatalf("expect less roundtrip than %d, actual %d", tx1, tx2)
+	}
+}
+
+func TestConnDataBlocked(t *testing.T) {
+	conn, err := Accept([]byte("server"), nil, NewConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.flow.setSendMax(100)
+	conn.flow.setSendBlocked(true)
+	dataBlocked := conn.sendFrameDataBlocked()
+	if dataBlocked == nil || dataBlocked.dataLimit != 100 {
+		t.Fatalf("expect data blocked frame, actual: %+v", dataBlocked)
 	}
 }
 
